@@ -1,0 +1,46 @@
+# Project-wide sdkconfig defaults (applied when sdkconfig is regenerated).
+#
+# Brownout detector is ENABLED again (it was temporarily disabled while
+# debugging spurious resets during WiFi startup). Detection stays at the
+# lowest threshold (level 0, ~2.42V) - the least sensitive setting:
+CONFIG_ESP_BROWNOUT_DET_LVL=0
+
+# If "E BOD: Brownout detector was triggered" resets come back, the supply
+# cannot handle the WiFi TX current peaks. Hardware fix: add 100uF + 0.1uF
+# across 3V3-GND close to the module, keep 5V/GND wires short and thick.
+# As a last resort the level can be lowered / the detector disabled again via:
+#   idf.py menuconfig -> Component config -> ESP32-Specific -> Brownout detector level
+
+# The app binary grew past 1MB once the mbedTLS certificate bundle was added
+# (https station support). Use the large single-app partition table
+# (factory 1.5MB). nvs/phy_init offsets are unchanged, so stored wifi
+# credentials and stations survive re-flashing.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Audio output: MAX98357 over I2S (the pwm/dac direct drive modes are
+# diagnostic only - see README "直驱输出模式").
+CONFIG_RADIO_AUDIO_I2S=y
+
+# The gptimer isr of the direct drive modes writes the dac/ledc register
+# directly. The isr must be able to run while the flash cache is disabled
+# (nvs / wifi calibration writes), so keep the handler in iram and allow
+# cache-safe execution. Harmless (and required again) if you switch modes.
+CONFIG_GPTIMER_ISR_CACHE_SAFE=y
+CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM=y
+
+# Streaming smoothness. The tcp receive window decides how far the cdn can
+# push ahead - with the lwip default (5760 = 4 * MSS) that is only 0.7 s of
+# audio, no matter how big the application buffer is. 28680 = 20 * MSS gives
+# ~3.6 s. The receive mail box must follow the formula
+# WND/MSS + 2 (28680/1440 + 2 = 22), otherwise lwip drops segments.
+CONFIG_LWIP_TCP_WND_DEFAULT=28680
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=28680
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=22
+
+# Undecoded mp3 buffer: 32 kB = 4 s of a 64 kbps stream. Absorbs the jitter
+# of the cdn without ever dropping a frame.
+CONFIG_RADIO_STREAM_BUF_SIZE=32768
+
+# The pin map is not a kconfig option: it lives in main/board_pins.h
+# (PIN_I2S_BCK / PIN_I2S_WS / PIN_I2S_DATA / PIN_STATUS_LED / PIN_AMP_SD /
+#  PIN_PWM / PIN_DAC_CHANNEL). One file, one edit, no sdkconfig sync.

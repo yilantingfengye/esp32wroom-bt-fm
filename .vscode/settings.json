@@ -1,0 +1,40 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "cmake.configureOnOpen": false,
+  "cmake.configureOnEdit": false,
+  "cmake.automaticReconfigure": false,
+  "cmake.autoSelectActiveFolder": false,
+  "cmake.options.advanced": {
+    "build": {
+      "statusBarVisibility": "inherit",
+      "inheritDefault": "hidden"
+    },
+    "launch": {
+      "statusBarVisibility": "inherit",
+      "inheritDefault": "hidden"
+    },
+    "debug": {
+      "statusBarVisibility": "inherit",
+      "inheritDefault": "hidden"
+    }
+  },
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "idf.port": "COM4",
+  "idf.currentSetup": "D:\\esp\\.espressif\\v6.1\\esp-idf",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32",
+    "IDF_PATH": "D:\\esp\\.espressif\\v6.1\\esp-idf",
+    "IDF_PYTHON_ENV_PATH": "C:\\Users\\chen\\.espressif\\python_env\\idf6.1_py3.11_env",
+    "PYTHONUTF8": "1"
+  },
+  "clangd.path": "C:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=f:\\ESP32-WROOM\\esp32-fm\\esp32_max98357_fm\\build"
+  ],
+  "idf.flashType": "UART"
+}

@@ -1,0 +1,72 @@
+menu "Internet Radio Stations"
+
+    config RADIO_STATION0_NAME
+        string "Station 1 name"
+        default "SomaFM Indie Pop"
+    config RADIO_STATION0_URL
+        string "Station 1 stream URL"
+        default "http://ice1.somafm.com/indiepop-128-mp3"
+
+    config RADIO_STATION1_NAME
+        string "Station 2 name"
+        default "SomaFM Groove Salad"
+    config RADIO_STATION1_URL
+        string "Station 2 stream URL"
+        default "http://ice2.somafm.com/groovesalad-128-mp3"
+
+    config RADIO_STATION2_NAME
+        string "Station 3 name"
+        default "SomaFM Beat Blender"
+    config RADIO_STATION2_URL
+        string "Station 3 stream URL"
+        default "http://ice2.somafm.com/beatblender-128-mp3"
+
+    config RADIO_STATION3_NAME
+        string "Station 4 name"
+        default "SomaFM Drone Zone"
+    config RADIO_STATION3_URL
+        string "Station 4 stream URL"
+        default "http://ice2.somafm.com/dronezone-128-mp3"
+
+    config RADIO_INITIAL_VOLUME
+        int "Initial volume (%)"
+        default 10
+        range 0 100
+
+    config RADIO_STREAM_BUF_SIZE
+        int "Stream buffer size (bytes)"
+        default 16384
+        range 4096 32768
+        help
+            Size of the internal buffer that holds undecoded MP3 data.
+            Larger values are more tolerant to network jitter but use
+            more RAM and add latency.
+
+endmenu
+
+choice RADIO_AUDIO_OUTPUT
+    prompt "Audio output interface"
+    default RADIO_AUDIO_I2S
+
+config RADIO_AUDIO_I2S
+    bool "I2S digital amplifier (MAX98357)"
+
+config RADIO_AUDIO_PWM
+    bool "PWM direct drive (headphone / small speaker, no i2s amp)"
+
+config RADIO_AUDIO_DAC
+    bool "DAC direct drive (headphone, internal 8-bit DAC on GPIO25/26)"
+
+endchoice
+
+# The pin map is NOT a kconfig option on purpose: it lives in
+# main/board_pins.h as plain #defines. Changing a pin there is a single
+# edit that can never be silently reverted when the sdkconfig is
+# regenerated, and there is no menuconfig round trip to forget.
+#
+#   PIN_I2S_BCK / PIN_I2S_WS / PIN_I2S_DATA / PIN_STATUS_LED / PIN_AMP_SD
+#   PIN_PWM / PIN_DAC_CHANNEL
+#
+# ESP32-WROOM rules: do not use gpio 1/3 (uart0), 6-11 (spi flash),
+# 34-39 (input only) or the strapping pins 0/2/5/12/15.
+
