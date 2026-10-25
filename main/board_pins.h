@@ -1,51 +1,62 @@
-#pragma once
-
-/* ================= board pin map (single source of truth) =================
+/*
+ * ============================================================================
+ *  board_pins.h —— 板级引脚定义（本工程引脚的【唯一来源】）
+ * ============================================================================
  *
- * Change a pin here, then rebuild + reflash. One place only - no menuconfig
- * and no sdkconfig sync, so regenerating the sdkconfig can never silently
- * move a pin back to an old value.
+ *  【设计原则】
+ *  所有引脚都写在这一个文件里。改引脚 = 改这一处 + 重新编译烧录，
+ *  不用去动 menuconfig，也不用去同步 sdkconfig，
+ *  这样"重新生成 sdkconfig 把引脚悄悄改回旧值"这种坑就不存在了。
  *
- * ESP32-WROOM restrictions:
- *   - gpio 1 / 3      : uart0 (the serial console) - do not use
- *   - gpio 6-11       : spi flash - do not use
- *   - gpio 34-39      : input only
- *   - gpio 0/2/5/12/15: strapping pins (their level at reset selects the
- *                       boot mode - avoid them for outputs)
- *   - gpio 25/26      : internal dac pads (fine as plain digital outputs as
- *                       long as the dac driver is not used)
- *   - gpio 27         : adc2 (the project does not use the adc)
+ *  【ESP32-WROOM 的硬件限制】（踩过坑的地方都在这）
+ *    - GPIO1 / GPIO3    : UART0，串口控制台占用，绝对不能碰
+ *    - GPIO6 ~ GPIO11   : SPI Flash（模块内部接 Flash 芯片），绝对不能碰
+ *    - GPIO34 ~ GPIO39  : 只能做输入，没有输出驱动
+ *    - GPIO0/2/5/12/15  : 启动模式引脚（复位时的电平决定进哪种启动模式），
+ *                        尽量别拿来做输出
+ *    - GPIO25 / GPIO26  : 芯片内部 DAC 的引脚（当普通数字输出用没问题，
+ *                        但前提是不要同时启用 DAC 驱动）
+ *    - GPIO27           : ADC2（本工程不用 ADC，所以可以占用）
+ *
+ *  【两个 I2S 引脚映射】
+ *  下面这套（27/25/33）是硬件【当前实际接的线】、【已实测能出声】的一组，
+ *  是开机默认。另一套（18/19/22，最早那版接线）可以在运行时用
+ *  "pins 1" 命令切换，切完记在 NVS 里 —— 这样以后任何一次烧录
+ *  都不可能再把已经能出声的功放改成哑的。
  */
 
-/* ---- MAX98357A I2S (std mode, philips format, 16 bit) ----
- *
- * The map below is the one the hardware is CURRENTLY wired for and the one
- * that is VERIFIED TO PRODUCE SOUND. It is the boot default:
- *
- *     BCLK = GPIO27, LRC/WS = GPIO25, DIN = GPIO33
- *
- * The alternative map (the original 18/19/22 wiring) can be selected at
- * runtime with the "pins" command and is then remembered in nvs, so no
- * future reflash can silence a working amplifier again. */
-#define PIN_I2S_BCK    27   /* -> module BCLK (bit clock)   */
-#define PIN_I2S_WS     25   /* -> module LRC / WS (word sel) */
-#define PIN_I2S_DATA   33   /* -> module DIN (data)         */
+#pragma once  // 头文件只包含一次
 
-/* Alternative map - the original wiring, use "pins 1" to select it. */
-#define PIN_I2S_BCK_ALT  18
-#define PIN_I2S_WS_ALT   19
-#define PIN_I2S_DATA_ALT 22
+/* ===================== MAX98357A 的 I2S 引脚（标准模式 / Philips 格式 / 16 位） =====================
+ *
+ *  接线对照：
+ *      BCLK = GPIO27  ->  模块 BCLK （位时钟，44.1kHz 时为 1.4112MHz）
+ *      LRC  = GPIO25  ->  模块 LRC  （左右声道选择/帧时钟，44.1kHz）
+ *      DIN  = GPIO33  ->  模块 DIN  （音频数据）
+ *  MCLK 不接（代码里填 I2S_GPIO_UNUSED）。
+ */
+#define PIN_I2S_BCK    27   /* -> 模块 BCLK（位时钟）      */
+#define PIN_I2S_WS     25   /* -> 模块 LRC / WS（声道选择） */
+#define PIN_I2S_DATA   33   /* -> 模块 DIN（音频数据）      */
 
-/* ---- status led (on while streaming, blinking while reconnecting) ---- */
+/* ---- 备用映射：最早那版接线，需要时用 "pins 1" 命令切过去 ---- */
+#define PIN_I2S_BCK_ALT  18  /* 备用 BCLK */
+#define PIN_I2S_WS_ALT   19  /* 备用 LRC  */
+#define PIN_I2S_DATA_ALT 22  /* 备用 DIN  */
+
+/* ===================== 状态指示灯 =====================
+ * 播放时点亮，重连/等待时闪烁。（GPIO26 同时是 DAC 通道 1，
+ * 但本工程用 I2S 输出，不受影响） */
 #define PIN_STATUS_LED 26
 
-/* ---- optional: drive the amplifier SD pin to test the module ----
- * -1 disables the feature. Wiring: gpio -> 22R -> SD pin of the module.
- *   sd 0 = pull low  (shutdown, the outputs must fall to ~0V)
- *   sd 1 = pull high (left channel only, 15 dB)
- *   sd z = float     (module default: (L+R)/2 mix, 9 dB) */
+/* ===================== 功放 SD 脚（诊断用，可选） =====================
+ * -1 = 关闭这个功能。接线：gpio -> 22R -> 模块 SD 脚
+ *   sd 0 = 拉低   （功放关断，输出应掉到 ~0V —— 证明芯片是活的）
+ *   sd 1 = 拉高   （只放左声道，增益 15dB）
+ *   sd z = 悬空   （模块默认：(L+R)/2 混合模式，增益 9dB）
+ * 平时这个脚是输入（高阻），所以不影响正常播放。 */
 #define PIN_AMP_SD     23
 
-/* ---- direct drive modes (diagnostic only, mutually exclusive with i2s) ---- */
-#define PIN_PWM        32   /* pwm direct drive output       */
-#define PIN_DAC_CHANNEL 0   /* 0 = gpio25, 1 = gpio26 (conflicts with the led) */
+/* ===================== 直驱输出模式（仅诊断用，与 I2S 互斥） ===================== */
+#define PIN_PWM        32   /* PWM 直驱输出引脚            */
+#define PIN_DAC_CHANNEL 0   /* DAC 通道：0 = GPIO25，1 = GPIO26（会和 LED 冲突） */

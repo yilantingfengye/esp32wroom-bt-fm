@@ -1,0 +1,14 @@
+# Custom partition table (2 MB flash, the esp32-wROOM default).
+#
+# The bluetooth stack (bluedroid + the a2dp sink) adds ~500 kB of code:
+# the app needs ~1.7 MB and the default "single app large" table only
+# offers 1.5 MB. The station list lives in the nvs, so no data partition
+# is needed besides that.
+#
+# The app partition reaches the end of the flash, so the firmware also
+# works on boards with a larger flash (the first 2 MB are used).
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x1F0000,

@@ -12,10 +12,33 @@ CONFIG_ESP_BROWNOUT_DET_LVL=0
 #   idf.py menuconfig -> Component config -> ESP32-Specific -> Brownout detector level
 
 # The app binary grew past 1MB once the mbedTLS certificate bundle was added
-# (https station support). Use the large single-app partition table
-# (factory 1.5MB). nvs/phy_init offsets are unchanged, so stored wifi
-# credentials and stations survive re-flashing.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# (https station support), and the bluetooth stack added another 700 kB on top
+# of that: the app is now 1.78 MB. The "single app large" table only offers
+# 1.5 MB, so a custom table is used (2 MB app partition, 2 MB flash layout -
+# see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Bluetooth a2dp sink: the phone streams sbc audio into the same amplifier.
+# The classic bluetooth stack needs ~40 kB of static ram, so the big audio
+# buffers are allocated from the heap at runtime (see main/radio_player.c).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+CONFIG_BT_AVRCP_ENABLED=y
+# Only classic bluetooth (BR/EDR) is needed - the phone pushes SBC audio.
+# BR_EDR_ONLY matches the official a2dp_sink example and keeps the ble
+# controller memory out of the way (this project is tight on ram).
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+# CONFIG_BT_BLE_ENABLED is not set
+
+# The bluetooth stack and the wifi driver together do not fit into the
+# esp32's 124 kB of static dram, so the wifi buffers are kept small and
+# the receive buffers live in dram instead of iram.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=2
+CONFIG_ESP_WIFI_RX_BA_WIN=2
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
 
 # Audio output: MAX98357 over I2S (the pwm/dac direct drive modes are
 # diagnostic only - see README "直驱输出模式").
@@ -37,10 +60,17 @@ CONFIG_LWIP_TCP_WND_DEFAULT=28680
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=28680
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=22
 
-# Undecoded mp3 buffer: 32 kB = 4 s of a 64 kbps stream. Absorbs the jitter
-# of the cdn without ever dropping a frame.
-CONFIG_RADIO_STREAM_BUF_SIZE=32768
+# Undecoded mp3 buffer: 16 kB = 2 s of a 64 kbps stream. It is allocated
+# from the heap while a stream plays (the bluetooth stack needs the ram),
+# so the tcp receive window (28 kB above) is the real jitter buffer.
+CONFIG_RADIO_STREAM_BUF_SIZE=4096
 
 # The pin map is not a kconfig option: it lives in main/board_pins.h
 # (PIN_I2S_BCK / PIN_I2S_WS / PIN_I2S_DATA / PIN_STATUS_LED / PIN_AMP_SD /
 #  PIN_PWM / PIN_DAC_CHANNEL). One file, one edit, no sdkconfig sync.
+
+# Boot volume. The volume is NOT saved to nvs by default: every reboot starts
+# at this value, and "vol <n>" only changes it until the next reboot.
+# Set CONFIG_RADIO_VOLUME_PERSIST=y to remember the last volume instead.
+CONFIG_RADIO_INITIAL_VOLUME=40
+# CONFIG_RADIO_VOLUME_PERSIST is not set

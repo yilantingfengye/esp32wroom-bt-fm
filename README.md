@@ -10,9 +10,14 @@
 - **ICY 元数据**：解析 `StreamTitle`，实时显示正在播放的曲目
 - **MP3 解码**：minimp3（单头文件，vendored 在 `components/minimp3`），流式帧同步 + 坏帧跳过
 - **I2S 输出**：标准 I2S 16bit 立体声直推 MAX98357，自动跟随流的采样率（32k/44.1k/48k）
-- **4 个电台槽位**：`url`/`name` 命令运行时修改，存 NVS，立即重连生效
+- **蓝牙 A2DP 接收（手机 → ESP32 → 功放）**：可像手机 App 一样**开启 / 关闭 / 释放**（见"工作模式"）
+- **两种工作模式，串口切换**：上电**不自动进电台**，默认蓝牙待命；`play <n>` 进电台模式（自动关蓝牙），`bt open` 切回蓝牙模式
+- **电台槽位可增删**：`url`/`name`/`add`/`del` 命令运行时修改，存 NVS，立即生效
 - **健壮性**：断流/断网自动重连（3s 退避）、缓冲满丢弃旧数据、日志节流（同类警告最多几秒一条）
 - **串口控制台**：`help` 查看全部命令
+
+> **电台与蓝牙互斥**：两者共用同一个 MAX98357A 功放和同一条 2.4GHz 射频，
+> 不会同时出声。切换由串口命令控制，射频与内存都会完整交接（见"工作模式与射频让渡"）。
 
 ## 硬件接线
 
@@ -254,7 +259,9 @@ wifi                          # 查看当前状态
 wifi clear                    # 清除已存凭据
 ```
 
-凭据存 NVS，之后开机自动连接。断开原因会打印 reason 码：
+凭据存 NVS，之后开机自动连 WiFi。但**上电不会自动播放电台** ——
+开机后停在蓝牙待命状态，等你发指令（`play <n>` 进电台，`bt open` 回蓝牙）。
+断开原因会打印 reason 码：
 
 | reason | 含义 | 处理 |
 |---|---|---|
@@ -270,24 +277,74 @@ url 0 https://lhttp.qingting.fm/live/339/64k.mp3
 name 0 北京新闻广播
 ```
 
+---
+
+## 工作模式与射频让渡（电台 ↔ 蓝牙）
+
+两者共用**同一个 MAX98357A 功放**，也共用**同一条 2.4GHz 射频**，
+所以是**互斥**的：同一时刻只有一路出声。模式由**串口命令**切换（上电不会自动进电台）。
+
+### 两种模式
+
+| 模式 | 怎么进 | 射频归谁 | 另一路的状态 |
+|---|---|---|---|
+| **蓝牙模式** | 上电默认；或 `bt open` / `bt mode` | 蓝牙独占 | WiFi 在手机连上时彻底关闭（`esp_wifi_stop`） |
+| **电台模式** | `play <n>` / `next` / `prev` | WiFi/电台独占 | 蓝牙**彻底释放**（协议栈卸载，约 40KB 内存归还堆） |
+
+退出电台模式：`stop` → 会话结束，自动恢复蓝牙（`bt_player_open` 冷/热启动）。
+
+### 蓝牙的生命周期
+
+```
+bt open   开启：没开过/被释放过 → 完整冷启动；close 过 → 秒级热启动
+bt close  关闭：断开手机 + 关控制器（协议栈和内存都保留，可秒级再开）
+bt free   释放：整个协议栈拆除，内存（约 40KB）全部归还堆
+```
+
+`bt` 命令里多了一行电源状态：`bluetooth : idle (power: on / closed / released)`。
+
+> **为什么电台模式要"释放"而不是只"关闭"蓝牙**：只关控制器时，
+> 蓝牙协议栈仍占着约 40KB 堆内存，电台随后要申请自己那 18KB 大缓冲就会跟它抢堆 ——
+> 抢不过就会让蓝牙栈申请不到入站缓冲而崩溃重启（之前已经发生过）。
+> 释放后堆上只剩电台一家，干净且安全。
+
+### FreeRTOS 调度约定
+
+- **蓝牙协议栈的回调里只做轻活**：A2DP 连接回调只置一个标志 + `xTaskNotifyGive` 唤醒音频任务；
+  停电台、锁 I2S、关 WiFi 这些**阻塞操作全部挪到音频任务里做**。
+  （曾踩坑：在回调里同步 `radio_stop_and_release()` 阻塞 ~1 秒 → AVDTP 信令被卡死 → 手机等超时主动断链，
+  症状是"上电第一次自动重连必掉、第二次才正常"。）
+- **蓝牙栈（BTC/HCI/控制器）全在 core 0**，音频消费者任务绑 **core 1**（应用核）——
+  这样它就算优先级提到 21 也绝不会饿死 BTC(19)。（也踩过坑：绑 core 0 + prio 21 会把 BTC 饿死。）
+- 播放统计打印间隔 **30 秒**（`BT_STAT_INTERVAL_US`），每包/波形调试打印由 `BT_VERBOSE` 控制（默认关）。
+
+---
+
 ## 串口命令
 
 | 命令 | 说明 |
 |---|---|
 | `help` | 显示帮助 |
 | `list` | 列出所有电台 |
-| `play <0-3>` | 播放指定电台 |
+| `play <0-3>` | 播放指定电台（**进电台模式**：自动关闭蓝牙） |
 | `next` / `prev` | 上/下一个电台 |
-| `stop` | 停止播放 |
+| `stop` | 停止播放（电台模式结束 → 自动重新开启蓝牙） |
 | `vol <0-100>` | 设置音量（`vol` 单独发显示当前值） |
 | `tone [f] [ms]` | 用 I2S 直接发方波测试音（1kHz/2s），日志会打印**实际写出字节数** |
 | `sd <0\|1\|z>` | 接管功放 SD 脚：`0`=强制关断，`1`=左声道/15dB，`z`=悬空（模块默认） |
 | `pins` | 列出所有 I2S 引脚映射（当前这套打 `*`） |
 | `pins <n>` | 切到第 n 套引脚（存 NVS，重启保持） |
+| `norm <0\|1>` | 自动响度增益：`1`=开（默认，音量恒定）`0`=关（原始电平） |
+| `bt` | 蓝牙（A2DP sink）状态：状态/设备地址/设备名/采样率/电源 |
+| `bt open`（同 `bt mode` / `bt on`） | **开启蓝牙**：停掉电台 + 冷/热启动协议栈，等手机连 |
+| `bt close`（同 `bt off`） | **关闭蓝牙**：断开手机 + 关控制器（协议栈和内存保留，秒级可再开） |
+| `bt free` | **释放蓝牙**：整个协议栈拆除，内存（约 40KB）全部归还堆 |
+| `bt disc` | 主动断开蓝牙设备 |
 | `url <n> <url>` | 修改第 n 个电台地址（存 NVS，当前台立即重连） |
 | `name <n> <名字>` | 修改第 n 个电台名（存 NVS） |
 | `add <url> [名字]` | **新增**一个电台（存 NVS，名字不给就从 URL 末段自动取） |
 | `del <n>` | **删除**第 n 个电台（存 NVS，后面的自动前移） |
+| `pl` | 显示当前电台解析出来的播放列表（`.m3u`） |
 | `wifi` | 显示 WiFi 状态（SSID/连接状态/IP） |
 | `wifi <ssid>\|<pass>` | 设置 WiFi 并连接（`|` 允许空格） |
 | `wifi clear` | 清除已存 WiFi 凭据 |
@@ -322,6 +379,324 @@ name 0 北京新闻广播
 
 > 想再放宽就改 `main/radio_player.c` 的 `MAX_STATIONS`（名字 48 字节 + URL 160 字节/个，
 > 32 个也才 6KB RAM）。
+
+## 音量与响度（为什么以前声音会忽大忽小）
+
+### 症状
+
+音量明明调好了，播起来还是"**时大时小**"——鼓点一响音量掉一截，安静段落又慢慢爬回来。
+
+### 根因：老版本用的是**峰值归一化 + 快起慢落**
+
+```c
+int32_t target = (32000 << 8) / peak;          // ← 每帧的「瞬时峰值」当响度
+if (target > s_audio_gain) s_audio_gain += (target - s_audio_gain) / 4;   // 快起
+else                        s_audio_gain += (target - s_audio_gain) / 32;  // 慢落
+```
+
+四个问题叠在一起：
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | **按每帧（26ms）的瞬时峰值算** | 一帧里一个鼓点，峰值就飙高 → 增益被砸掉 25%（-2.6dB） |
+| 2 | **快起慢落**（1/4 vs 1/32） | 砸下去要 32 帧 ≈ **0.85 秒**才爬回来 → 听感是"呼吸" |
+| 3 | **峰值恒定 ≠ 响度恒定** | 响度取决于 RMS：鼓点多的段落小声、持续弦乐大声 |
+| 4 | **`vol` 只是静态乘法器** | `g = gain * vol / 100`，**完全不参与动态过程** → 调音量对"忽大忽小"无效 |
+
+### 现在的做法：基于**平滑 RMS**（≈听感响度）+ 双向限速
+
+```c
+#define AGC_TARGET_RMS   6000      /* 目标 -15 dBFS，留出峰值余量 */
+#define AGC_MAX_STEP     32        /* 每帧最多变化 ~1 dB（38 dB/s） */
+#define AGC_RMS_SMOOTH   4         /* 一阶平滑，时间常数 ~100ms */
+
+/* 每帧：算 RMS → 平滑 → 求目标增益 → 限速逼近 */
+int32_t diff = target - s_audio_gain;
+if (diff >  AGC_MAX_STEP) diff =  AGC_MAX_STEP;
+if (diff < -AGC_MAX_STEP) diff = -AGC_MAX_STEP;
+s_audio_gain += diff;
+```
+
+- **双向同速** → 无论变响还是变轻都是 38dB/s，**没有呼吸感**
+- **看 RMS 不看峰值** → 鼓点不再把音量砸下去
+- **每条流开始时重置** → 换台不会继承上一台的电平
+- **首帧直接跳到目标**（不是淡入）→ 换台瞬间就是对的响度
+
+### 开关
+
+```
+norm        查看状态
+norm 0      关掉自动增益 = 原始电平（广播流本身 -12dBFS，会比较轻）
+norm 1      打开（默认）
+```
+
+想听"原汁原味"的动态（不被压缩的起伏）就用 `norm 0`，然后用 `vol` 调整体大小。
+
+### 默认音量
+
+开机音量由 Kconfig 的 `CONFIG_RADIO_INITIAL_VOLUME` 决定，当前出厂值为 **40**。
+
+```
+I radio: initial volume: 40% (default, not saved)
+```
+
+**默认不记忆音量**：`vol 60` 只改内存里的值，重启后回到默认 40；想要多大声音自己调。
+
+需要"记住上次音量"的话，打开持久化开关（**默认关闭**）：
+
+```
+CONFIG_RADIO_VOLUME_PERSIST=y
+```
+
+可以在 `idf.py menuconfig` 里勾选，或直接写进 `sdkconfig` / `sdkconfig.defaults`。
+打开后开机日志会变成：`initial volume: xx% (persistent)`。
+
+**出厂值的持久化**：为避免清空 `sdkconfig` 后退回 1，
+`sdkconfig.defaults` 里已固化：
+
+```
+CONFIG_RADIO_INITIAL_VOLUME=40
+# CONFIG_RADIO_VOLUME_PERSIST is not set
+```
+
+**Kconfig 的 `default` 只是"出厂值"**：`sdkconfig` 里已经有这个键时，它永远赢。
+
+---
+
+## 蓝牙播放（手机 → ESP32 → 功放）
+
+ESP32 作为 **A2DP Sink**，手机把音乐通过蓝牙推过来，**从同一个 MAX98357A 功放出来**。
+
+```
+手机 --BT/SBC--> Bluedroid --SBC 解码--> PCM --环形缓冲--> I2S --> MAX98357A
+```
+
+### 用法
+
+1. 手机「设置 → 蓝牙 → 搜索设备」→ 找到 **ESP32 Radio** → 配对
+2. 手机里选一个歌/视频/音乐 App → 输出设备选 **ESP32 Radio**
+3. 串口里可以看到：
+
+```
+I bt: a2dp sink ready (sbc 44100 hz stereo), name 'ESP32 Radio'
+I bt: connected: A4:83:E7:xx:xx:xx
+I bt: device name: 某某的手机
+I bt: audio codec configured
+```
+
+**手机连上时电台会自动让位**（同一个功放不能同时放两路），
+**手机断开后电台自动恢复** ✓
+
+```
+bt            蓝牙状态（状态/设备地址/设备名/采样率/溢出次数/电源）
+bt open       开启蓝牙（同 bt mode / bt on）
+bt close      关闭蓝牙（同 bt off）
+bt free       释放蓝牙：协议栈拆除、内存归还堆
+bt disc       主动断开手机
+```
+
+> **注意**：电台模式期间蓝牙是关闭的，手机此时**搜不到也连不上**（预期行为）。
+> 想用蓝牙先 `stop` 停掉电台（会自动恢复蓝牙），或直接用 `bt open`（同样会先停电台）。
+
+### 关键实现细节
+
+| 项 | 说明 |
+|---|---|
+| **SBC 解码** | **不用自己写解码器**：Bluedroid 栈内置 Open Interface SBC 解码器（`CONFIG_BT_A2DP_USE_EXTERNAL_CODEC` 保持关闭），应用层直接拿 **16bit PCM** |
+| **能力协商** | **不自己注册流端点**：内部解码器模式下栈在 `esp_a2d_sink_init()` 时就注册好了默认 SBC 端点（官方示例同样不注册） |
+| **AVRCP** | 目标端（`esp_avrc_tg_*`）：**没有它很多手机（尤其 iOS）根本不会把 ESP32 列成音频输出设备**；顺带支持手机音量条控制本机音量 |
+| **BT+WiFi 共存** | `CONFIG_SW_COEXIST_ENABLE=y`，经典蓝牙和 WiFi 同时工作 |
+| **音源仲裁** | `radio_i2s_lock()`：手机连上 → 停电台、**同步等电台释放堆缓冲**、锁住 I2S；断开 → 解锁、恢复电台。电台的输出也会检查这把锁，两个写者绝不能同时往 I2S 里写 |
+| **环形缓冲** | 16KB（186ms，远大于栈一次回调的 2560 字节），单生产者单消费者无锁；满了丢最旧的并计数（`bt` 命令里的 overruns） |
+| **采样率/声道** | 按 `ESP_A2D_AUDIO_CFG_EVT` 里**协商的结果**走（16/32/44.1/48k、立体声/单声道），写死 44.1k 一定会破音 |
+
+### ⚠️ 三个"手机搜不到"的坑（IDF 6.x 专属）
+
+第一次上机时手机**完全搜不到** ESP32，查出来是三个坑叠在一起：
+
+| # | 坑 | 现象 | 正确做法 |
+|---|---|---|---|
+| 1 | **漏了 `esp_bt_controller_enable()`** | 串口报 `Controller not initialised`，**整个蓝牙栈根本没起来** | IDF 6.x 里 `esp_bt_controller_init()` 只把状态置成 `INITED`，还要 `esp_bt_controller_enable(模式)` 才会变 `ENABLED`，而 `esp_bluedroid_init()` 要求已经是 `ENABLED` |
+| 2 | **enable 的模式必须和 init 时一致** | `esp_bt_controller_enable()` 返回 `ESP_ERR_INVALID_ARG` | 模式要和 `BT_CONTROLLER_INIT_CONFIG_DEFAULT()` 里的 `.mode` **完全一样**。我们把 Kconfig 改成 `CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y`（官方示例的做法），顺带**省下 600KB flash + 7KB DRAM**（不用 BLE） |
+| 3 | **漏了 `esp_bt_gap_set_scan_mode()`** | 栈起来了、手机还是搜不到 | 经典蓝牙（BR/EDR）**没有 BLE 那种"广播"**，必须显式设成"可连接 + 可被发现"：`esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE)` |
+
+**正确的初始化顺序**（官方 `a2dp_sink_stream` 示例）：
+
+```c
+esp_bt_controller_mem_release(ESP_BT_MODE_BLE);   // 不用 BLE 就把它的内存释放掉
+esp_bt_controller_init(&bt_cfg);                   // -> INITED
+esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT); // -> ENABLED  ★ 少这行就全废
+esp_bluedroid_init_with_cfg(&bluedroid_cfg);
+esp_bluedroid_enable();
+esp_avrc_tg_init();                               // AVRCP 必须在 A2DP 之前
+esp_a2d_sink_init();
+esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);  // ★ 手机靠这个才搜得到
+```
+
+正常启动应该是这样：
+
+```
+I (849) BTDM_INIT: Bluetooth MAC: 30:ae:a4:89:87:d2
+I (1569) bt: discoverable, waiting for a phone ...
+I (1589) bt: a2dp sink ready (sbc 44100 hz stereo), name 'ESP32 Radio'
+```
+
+**还是搜不到的话**，按这个顺序排查：
+1. **天线**：WROOM 模块的 PCB 天线不能被金属/导线/手挡住（BT 的射频比 WiFi 弱很多）
+2. 手机里**取消配对**旧的记录再扫
+3. 有些手机只在"媒体输出 → 选设备"里才列蓝牙音频设备，主蓝牙列表里看不到
+
+### ⚠️ 五个"连上了却没声音 / 破音"的坑（IDF 6.x 专属）
+
+手机连上了、码流也起来了（`audio stream started`），**但一个采样都收不到**，
+或者听到了却是破音 —— 这一节把这五个坑都列出来，每个都有对应的日志特征。
+
+| # | 坑 | 现象 / 日志特征 | 正确做法 |
+|---|---|---|---|
+| 1 | **回调 API 用错** | `pcm in : 0 cb`（回调一次都没被调用） | 内部解码器要用 `esp_a2d_sink_register_data_callback()`（交来**已解码的 PCM**）；`esp_a2d_sink_register_audio_data_callback()` 是**外部解码器**专用（交来未解码的 SBC 帧），用它回调**永远不会被调用** |
+| 2 | **自己注册了流端点** | 同上，PCM 不来 | 内部解码器模式下**不要**调 `esp_a2d_sink_register_stream_endpoint()`：栈在 `esp_a2d_sink_init()` 时就注册好了默认 SBC 端点，自己再注册一个会**顶掉**它 |
+| 3 | **内存被电台占着** | `E BT_OSI: malloc failed (size=4112)` + `heap info: free=4340` | 蓝牙栈连接后**立刻**要 4KB（媒体线程 + SBC 解码器），而电台还占着 23KB → 申请失败 → **媒体线程根本没起来** → 一个采样都收不到。用 `radio_stop_and_release()` **同步等电台把堆缓冲还回来**再让蓝牙往下走 |
+| 4 | **环形缓冲不够大** | `overruns: 932`（一直在丢音频）→ 声音断断续续 | 蓝牙栈**不是匀速喂数据**的：WiFi/BT 调度一抖动就一次吐好几包。实测丢音频比例：4KB→9.3%、8KB→2.2%、16KB→0.5%，所以要用 **32KB（186ms）**。而且写 I2S 要**小块写**（256 帧/次），大块写会阻塞在 DMA 上、期间新数据全堆在环里 |
+| 5 | **采样率/声道写死了** | 声音"破"（音调不对、左右错位） | 从 `ESP_A2D_AUDIO_CFG_EVT` 里读**协商结果**（采样率 16/32/44.1/48k、声道模式），I2S 时钟跟着走；手机协商到单声道时要复制成左右声道 |
+
+**判定口诀**（`bt` 命令里的计数器）：
+
+```
+pcm in  : 0 cb            → 坑 1/2/3：协议栈根本没把 PCM 交过来
+pcm in  有数 / i2s out = 0 → 音频任务没在写（检查任务和 I2S 锁）
+overruns > 0              → 坑 4：环太小 / 写 I2S 的块太大，音频在被丢
+pcm in ≈ i2s out           → 通路正常，剩下的就是音量/功放/接线
+```
+
+### ⚠️ 内存：为什么大缓冲都放在堆里
+
+蓝牙栈要吃掉约 40KB 的**静态** RAM，而 ESP32 的链接器只给应用分 **124KB 静态 DRAM**
+（堆还有 ~96KB）。直接开蓝牙会**链接失败**（DRAM 溢出 40KB）。
+
+解决方式：**把大缓冲改成堆分配，用完就还**：
+
+| 缓冲 | 大小 | 分配时机 | 释放时机 |
+|---|---|---|---|
+| 电台流缓冲 + 解码缓冲 | 15KB | 开始播放时 `malloc` | 停止时 `free` |
+| 蓝牙 PCM 环形缓冲 | 32KB | 手机连上时 `malloc` | 断开时 `free` |
+
+电台和蓝牙本来就**互斥**，所以内存可以干净地交接 ✓
+（代价：切换时会有一两次 malloc/free，堆碎片可接受）。
+
+⚠️ 交接必须是**同步**的：蓝牙栈在连接回调返回后**立刻**就要 4KB，
+电台的缓冲是电台任务异步释放的（它要先退出收流循环）。
+两者错开 ~170ms 就正好撞上 → `BT_OSI: malloc failed` → 蓝牙没声音。
+所以蓝牙连接时调 `radio_stop_and_release(1000)`：**等电台真的把内存还回来**再继续。
+
+其它省内存的手段：
+- WiFi 静态接收缓冲 10 → 2（省 IRAM）
+- 关闭 `ESP_WIFI_RX_IRAM_OPT`（接收缓冲放 DRAM 而不是 IRAM）
+- 流缓冲 32KB → 16KB（TCP 窗口 28KB 才是真正的抖动缓冲）
+
+### 分区表
+
+蓝牙让固件从 1.05MB 涨到 **1.78MB**，默认的 "single app large" 分区（1.5MB）装不下，
+所以改用自定义 `partitions.csv`：
+
+```
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x1F0000,   ← 1.9MB
+```
+
+按 **2MB flash** 设计（IDF 默认值），所以 2MB/4MB 的板子都能烧 ✓
+（4MB 的板子只用了前 2MB）。
+
+---
+
+## 播放在线音乐（.m3u 播放列表 + 断点续传）
+
+### ① 播放列表：把电台地址指向一个 `.m3u` 文件
+
+**不需要新命令**——`url` 命令填一个 `.m3u` 地址就行，固件会自动识别并逐首播放：
+
+```
+url 0 http://192.168.1.100:8000/list.m3u
+play 0
+pl            ← 看解析出来的歌单
+```
+
+日志：
+
+```
+I radio: playlist: 3 entries from http://192.168.1.100:8000/list.m3u
+I radio: playlist 1/3: 01 晴天
+I radio: stream: 01 晴天 (http 200, metaint=-1, type=audio/mpeg)
+I radio:   mp3: 44100 Hz, 2 ch, 128 kbps
+I radio: playlist 2/3: 02 稻香
+...
+```
+
+**支持的标准 m3u 格式**：
+
+```
+#EXTM3U
+#EXTINF:-1,歌名
+http://host/song1.mp3        ← 绝对地址
+song2.mp3                    ← 相对地址（相对播放列表所在目录解析）
+```
+
+- `#EXTINF:` 的歌名会显示为曲目名
+- **相对地址**按播放列表的目录解析 → 同一个歌单换台机器也能用
+- 相对地址里的**空格/中文会自动百分号编码**（`01 晴天.mp3` → `01%20%E6%99%B4%E5%A4%A9.mp3`），
+  已经编码过的 `%xx` 不会二次编码
+- 最多 16 首（`PL_MAX_ENTRIES`），整个列表播完自动从头再来
+
+### ② 断点续传：大文件断了不用从头下
+
+- 服务端给了 `Content-Length`（= 这是个**文件**而不是直播流）→ 记下已收字节数
+- 连接断了/重连时带 `Range: bytes=<已收>-` → **服务端回 206，从断点继续**
+- 服务端**忽略** Range（回 200）→ 自动从头开始，不会重复播放
+- **直播流没有 Content-Length → 永远从当前流的开头读**（不会错误地发 Range）
+
+日志：
+
+```
+I radio: resuming at byte 1048576/5242880
+I radio:   resumed: 4194304 bytes left
+```
+
+### ③ 电脑上的音乐怎么放上来（一条命令）
+
+仓库里带了一个零依赖的小服务器（**支持 Range**，所以断点续传也能测）：
+
+```powershell
+python tools\serve_music.py D:\我的音乐 --port 8000
+```
+
+它会打印出可以直接粘进串口的地址：
+
+```
+  playlist  http://192.168.1.100:8000/list.m3u      (relative entries)
+  playlist  http://192.168.1.100:8000/list_abs.m3u  (absolute urls)
+```
+
+| 地址 | 用途 |
+|---|---|
+| `/list.m3u` | 相对地址的歌单（推荐，换 IP 也能用） |
+| `/list_abs.m3u` | 绝对地址的歌单（用来对比测试） |
+| `/任意文件.mp3` | 直接访问单曲也行（播完自动从头再来） |
+
+自测脚本（不需要 esp32，验证歌单生成和 Range）：
+
+```powershell
+python tools\test_serve_music.py
+```
+
+### ⚠️ 播不了的东西（说清楚免得白折腾）
+
+| 形态 | 原因 |
+|---|---|
+| **`.m3u8`（HLS）** | 它的分片是 TS/fMP4 容器（多半还是 AAC），本工程只解 MP3。**注意：本工程把 `.m3u8` 当成普通文本歌单处理**，如果分片不是 MP3 会解不出来 |
+| **QQ音乐/网易云直链** | 播放地址带签名且时效很短，返回的是 **AES-128 加密的 HLS**，且多为 AAC → 需要额外的解密库和 AAC 解码器 |
+| **网盘直链** | 多数是网页或带 token 的临时地址 |
+
+**可行的路子**：局域网自建歌单（上面的脚本）、公开播客的 MP3 直链、各种开放电台目录。
 
 国内可直接使用蜻蜓 FM 直链，格式：
 
@@ -419,9 +794,103 @@ esp32_max98357_fm/
 │   ├── main.c                # 入口 + 串口命令
 │   ├── wifi_station.c/.h     # WiFi STA（NVS 凭据、退避重连、事件处理）
 │   ├── radio_player.c/.h     # 核心：HTTP 流 + ICY 解析 + 解码 + I2S 输出
-│   └── CMakeLists.txt
+│   ├── bt_player.c/.h        # 蓝牙 A2DP sink（手机推流 → 同一个功放）
+│   ├── CMakeLists.txt
+│   └── ...
+└── tools/
+    ├── serve_music.py         # 本地音乐服务器（生成 .m3u，支持 Range 续传）
+    ├── test_serve_music.py    # 它的自测脚本（python tools\test_serve_music.py）
+    └── translate_comments.py  # 把源码里残留的英文注释批量换成中文
 └── .vscode/                  # ESP-IDF 插件设置（IDF_PATH、Python 环境）
 ```
+
+---
+
+## 源码编码格式（重要，改代码前先看这段）
+
+### 一句话版本
+
+> **所有源码、脚本、文档都是 UTF-8（无 BOM）+ CRLF 换行；注释一律中文。**
+
+`.gitattributes` 已经把这套规则锁死了，正常用 git 拉下来/提交都不会乱。
+
+### 1. 文件编码：UTF-8 **无 BOM**
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| 字符编码 | **UTF-8** | 中文注释、README 中文都需要 |
+| BOM | **不要**（no BOM） | 带 BOM 的 `.c/.h` 会被工具链当成文件头字符，轻则编译报错、重则注释乱码 |
+| 换行符 | **CRLF**（Windows） | 和仓库里其它文件保持一致，避免整个文件在 diff 里全变 |
+
+验证方法（PowerShell）：
+
+```powershell
+# 应该输出 "no-BOM" 和 CRLF 数量
+$b = [System.IO.File]::ReadAllBytes("main\radio_player.c")
+"$(if($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF){'BOM'}else{'no-BOM'})"
+```
+
+VS Code 里设一次就一劳永逸：
+
+```jsonc
+// .vscode/settings.json
+{
+  "files.encoding": "utf8",          // 注意：不是 utf8bom
+  "files.eol": "\r\n",
+  "files.insertFinalNewline": true
+}
+```
+
+### 2. 注释：全中文
+
+自研代码（`main/`、`tools/`、构建脚本、Kconfig）里的**注释全部是中文**，
+`components/minimp3` 是第三方库（lieff/minimp3，MIT），**保持原样不动**。
+
+改动注释时注意：
+
+- 注释里如果出现了 `*/`，一定要写成 `*\/` 或者换行，否则会提前结束注释块
+- 注释里出现中文全角标点没问题，**但不要在注释里出现 `??` 这样的三字符序列**（GCC 会警告）
+- 行尾注释（`// ...`）里也别写 `\` 续行
+
+批量把英文注释换成中文可以用仓库里的脚本（映射表在文件顶部的 `MAP`）：
+
+```powershell
+python tools\translate_comments.py
+```
+
+它只替换"整块都是英文"的注释，**已经写成中文的不会动**，
+并且保持 UTF-8 无 BOM + CRLF 不变。
+
+### 3. 串口终端里的中文显示
+
+固件的**日志文本全是英文**（`I radio: ...`），所以终端代码页不影响日志。
+但**电台曲名**（ICY 元数据）会原样透传，绝大多数国内电台发的是 **GBK**，
+所以在默认的 GBK 代码页终端里会显示成乱码 —— **这不是 bug**。
+
+三个办法任选：
+
+```powershell
+# 1. 切到 UTF-8 代码页（Windows 10 1903+ 自带）
+chcp 65001
+idf.py -p COM4 monitor
+
+# 2. 用支持 UTF-8 的终端（Windows Terminal / VS Code 终端 / MobaXterm）
+
+# 3. 串口工具里把"接收编码"设成 GBK（如果你的终端不支持 UTF-8）
+```
+
+IDF monitor 本身按 UTF-8 输出，Windows Terminal / VS Code 终端下曲名是正常的。
+
+### 4. 固件里的字符串常量
+
+固件源码里的**中文字符串常量很少**（日志一律用英文），
+万一要加中文常量，注意：
+
+- 源文件是 UTF-8，但 ESP32 的 flash 里存的是 UTF-8 字节，
+  打印时终端要按 UTF-8 解码才对得上（`chcp 65001`）
+- 中文常量会占 3 字节/字符，尽量别往日志里塞中文（省 flash，也省串口带宽）
+
+---
 
 ## 配置项（idf.py menuconfig）
 
@@ -476,13 +945,16 @@ NVS 键 `pin_bck` / `pin_ws` / `pin_data`——**存的是引脚本身而不是�
 
 ## 已知问题与注意事项
 
-1. **MAX98357 模块无声 → ✅ 已解决（本机实测出声）**：**固件侧从一开始就是对的**——
+1. **MAX98357 模块无声 / 喀哒声 → ✅ 已解决（本机实测出声）**：**固件侧从一开始就是对的**——
    `tone` 日志显示 352800 字节在 1970ms 内写进 I2S DMA（= 精确 44.1kHz 实时），
    说明 BCLK 在 GPIO 上以 1.41MHz 正常翻转；I2S 配置与一份**实测能出声**的
    参考例程逐项一致（Philips/16bit/无 MCLK）。
-   真正的坑在硬件侧：**功放从 3.3V 轨取电**（峰值 400–800mA，和 WiFi 峰值叠加
-   把轨拉塌 → 载波被压扁 → "嗤嗤"声 + 只在开关瞬间有声），**以及模块 GND 与
-   ESP32 GND 的共地/测量参考点**。
+   真正的坑在硬件侧，两个都跟"电"有关：
+   - **功放从 3.3V 轨取电**（峰值 400–800mA，和 WiFi 峰值叠加把轨拉塌 → 载波被压扁
+     → "嗤嗤"声 + 只在开关瞬间有声）→ **功放独立供电（建议 5V）**；
+   - **共地没接稳**（模块 GND 与 ESP32/电源 GND 接触不良/虚接）→ 音频回流路径阻抗
+     随电流变化，叠加出宽带脉冲杂音，**空闲时和放歌时都有喀哒声**。
+     **接牢共地后喀哒声消失，播放正常。**（排查软件前务必先确认共地可靠。）
    **当前能出声的接线：BCLK=GPIO27、LRC=GPIO25、DIN=GPIO33**（映射 0，已实测）。
    为防止以后再被引脚改动坑到，引脚映射做成了运行时可切换（`pins` 命令），
    选中的那套记在 NVS 里 → **任何一次烧录都不会再把功放改哑**。
@@ -531,6 +1003,10 @@ NVS 键 `pin_bck` / `pin_ws` / `pin_data`——**存的是引脚本身而不是�
 | DAC 直驱耳机听不到 | DAC 只能提供几 mA，16Ω 负载需要 100mA；没有隔直电容时 1.65V 直流直接把它拉塌 | DAC 只作测量工具；直驱听感用 PWM + 缓冲级，或换功放 |
 | 播放中出现 `mp3 decode error, skipping frame` + 咔哒声 | 流缓冲满时"丢最旧字节"，破坏了 MP3 帧边界，解码器错帧 | 改成**背压**：缓冲满就不从 socket 读，让 TCP 窗口自己收窄，一个字节都不丢 |
 | 播放中持续小卡顿（不是断续，是"抖"） | WiFi 默认 min-modem 省电，每个包带 10ms+ 抖动；且 TCP 窗口只有 5760（0.7s），上游推不远 | `esp_wifi_set_ps(WIFI_PS_NONE)` + TCP 窗口/接收邮箱放大到 28680/22 + 流缓冲 32KB |
+| **喀哒声**（空闲时也有、放歌时一个字都听不清） | **硬件问题：功放 GND 与 ESP32/电源 GND 没接稳** —— 地线松动/虚接时，音频回流路径阻抗随电流变化，叠加出宽带脉冲杂音；软件缓冲再怎么调都只是治标 | **把共地接牢**（单点粗线、焊牢/压接可靠）；软件侧的缓冲/水位/射频隔离保留作加固 |
+| 上电第一次自动重连必掉、第二次才正常 | A2DP 连接回调里**同步**执行了阻塞操作（`radio_stop_and_release()` 最长 1 秒 + `esp_wifi_stop()` 几百毫秒），AVDTP 信令被卡死 → 手机等超时主动断链 | 回调里只置标志 + `xTaskNotifyGive`，重活全部挪到音频任务 |
+| 蓝牙连不上（连上码流起了但没声音/栈崩） | 消费者任务绑 **core 0** 且优先级 21 > BTC(19)，把蓝牙栈饿死 | 消费者任务改绑 **core 1**（应用核，没有蓝牙栈任务） |
+| 环形缓冲开 32KB 后整机崩溃重启 | 32KB 环 + 蓝牙栈的入站缓冲一起把堆吃光 → `host_recv_pkt_cb couldn't acquire memory` + 断言 | 环保持 **16KB（8192 采样）**；同时让大缓冲按需分配、用完即还 |
 
 ## 许可
 

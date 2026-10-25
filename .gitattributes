@@ -1,0 +1,29 @@
+# 源码统一用 UTF-8（无 BOM）+ CRLF 换行
+#
+# 为什么要锁死：
+#   1. 源文件带 BOM 时，GCC / 某些工具链会把 BOM 当成文件头字符，
+#      轻则编译报错，重则注释乱码。
+#   2. 换行符混杂（一部分 LF、一部分 CRLF）会让 git 每次都显示
+#      "整个文件都改了"，diff 完全没法看。
+#
+# 规则：
+#   *.c *.h *.py *.md *.txt *.csv *.projbuild  -> UTF-8，无 BOM，CRLF
+#   二进制文件（固件、图片）-> 不做转换
+
+* text=auto eol=crlf
+
+*.c    text eol=crlf
+*.h    text eol=crlf
+*.py   text eol=crlf
+*.md   text eol=crlf
+*.txt  text eol=crlf
+*.csv  text eol=crlf
+*.yml  text eol=crlf
+*.json text eol=crlf
+*.projbuild text eol=crlf
+
+# 这些不是文本，别让 git 去改它们
+*.bin binary
+*.elf binary
+*.png binary
+*.jpg binary

@@ -1,12 +1,25 @@
-menu "Internet Radio Stations"
+# ============================================================================
+#  main/Kconfig.projbuild —— 编译期选项（idf.py menuconfig 里能看到）
+# ============================================================================
+#
+#  【重要提醒】Kconfig 里的 default 只是"出厂值"！
+#  只有在项目【第一次】生成 sdkconfig 时才会被采用；
+#  一旦 sdkconfig 里已经存在这个键，menuconfig 保存时写的是 sdkconfig，
+#  它就永远赢过这里的 default。
+#  所以想改默认值，要么改 sdkconfig，要么用 menuconfig 改完保存。
+#  （这是本工程踩过的坑：改 Kconfig 的 default 后编译，值一点没变。）
 
+menu "Internet Radio Stations"          # 菜单标题：互联网电台
+
+    # ---- 电台 1 ----
     config RADIO_STATION0_NAME
-        string "Station 1 name"
-        default "SomaFM Indie Pop"
+        string "Station 1 name"         # 菜单里显示的说明文字
+        default "SomaFM Indie Pop"      # 出厂默认值
     config RADIO_STATION0_URL
-        string "Station 1 stream URL"
+        string "Station 1 stream URL"    # 电台的流地址
         default "http://ice1.somafm.com/indiepop-128-mp3"
 
+    # ---- 电台 2 ----
     config RADIO_STATION1_NAME
         string "Station 2 name"
         default "SomaFM Groove Salad"
@@ -14,13 +27,15 @@ menu "Internet Radio Stations"
         string "Station 2 stream URL"
         default "http://ice2.somafm.com/groovesalad-128-mp3"
 
+    # ---- 电台 3 ----
     config RADIO_STATION2_NAME
         string "Station 3 name"
         default "SomaFM Beat Blender"
     config RADIO_STATION2_URL
-        string "Station 3 stream URL"
+        string "Station 2 stream URL"
         default "http://ice2.somafm.com/beatblender-128-mp3"
 
+    # ---- 电台 4 ----
     config RADIO_STATION3_NAME
         string "Station 4 name"
         default "SomaFM Drone Zone"
@@ -28,45 +43,66 @@ menu "Internet Radio Stations"
         string "Station 4 stream URL"
         default "http://ice2.somafm.com/dronezone-128-mp3"
 
+    # ---- 开机音量 ----
     config RADIO_INITIAL_VOLUME
-        int "Initial volume (%)"
-        default 10
-        range 0 100
-
-    config RADIO_STREAM_BUF_SIZE
-        int "Stream buffer size (bytes)"
-        default 16384
-        range 4096 32768
+        int "Initial volume (%)"         # 0~100 的整数
+        default 40                       # 出厂音量
+        range 0 100                      # 允许的范围
         help
-            Size of the internal buffer that holds undecoded MP3 data.
-            Larger values are more tolerant to network jitter but use
-            more RAM and add latency.
+            开机时使用的音量。只在 RADIO_VOLUME_PERSIST 关闭时，
+            或者从没设过音量时起作用。
 
-endmenu
+    # ---- 音量是否重启后保持 ----
+    config RADIO_VOLUME_PERSIST
+        bool "Remember the volume across reboots"
+        default n
+        help
+            打开后：控制台里 "vol <n>" 调过的音量会存进 NVS，
+            下次开机自动恢复成上次的值。
+            默认关闭：每次重启都回到 RADIO_INITIAL_VOLUME 设定的默认音量，
+            想大声就自己调（不记忆）。
 
+    # ---- 未解码 MP3 缓冲大小 ----
+    config RADIO_STREAM_BUF_SIZE
+        int "Stream buffer size (bytes)" # 单位：字节
+        default 4096                     # 出厂 4KB（堆要留给蓝牙栈的 32KB 环形缓冲）
+        range 4096 32768                 # 允许 4KB~32KB
+        help
+            存放"还没解码的 MP3 数据"的内部缓冲区大小。
+            越大越能扛网络抖动，但占更多 RAM、直播延迟也更大。
+            注意：这块内存是播放时从堆上申请的，停止播放就还给系统
+            （因为蓝牙栈需要同一块内存）。
+
+endmenu                                 # 结束"互联网电台"菜单
+
+# ============================================================================
+#  音频输出方式（三选一）
+# ============================================================================
 choice RADIO_AUDIO_OUTPUT
-    prompt "Audio output interface"
-    default RADIO_AUDIO_I2S
+    prompt "Audio output interface"     # 菜单里的选项名
+    default RADIO_AUDIO_I2S             # 默认走 I2S
 
 config RADIO_AUDIO_I2S
-    bool "I2S digital amplifier (MAX98357)"
+    bool "I2S digital amplifier (MAX98357)"   # 数字功放（本工程的主线）
 
 config RADIO_AUDIO_PWM
-    bool "PWM direct drive (headphone / small speaker, no i2s amp)"
+    bool "PWM direct drive (headphone / small speaker, no i2s amp)"  # PWM 直驱
 
 config RADIO_AUDIO_DAC
-    bool "DAC direct drive (headphone, internal 8-bit DAC on GPIO25/26)"
+    bool "DAC direct drive (headphone, internal 8-bit DAC on GPIO25/26)"  # 内部 DAC 直驱
 
 endchoice
 
-# The pin map is NOT a kconfig option on purpose: it lives in
-# main/board_pins.h as plain #defines. Changing a pin there is a single
-# edit that can never be silently reverted when the sdkconfig is
-# regenerated, and there is no menuconfig round trip to forget.
+# ============================================================================
+#  关于引脚定义为什么不在 menuconfig 里
+# ============================================================================
 #
-#   PIN_I2S_BCK / PIN_I2S_WS / PIN_I2S_DATA / PIN_STATUS_LED / PIN_AMP_SD
-#   PIN_PWM / PIN_DAC_CHANNEL
+#  引脚故意做成 main/board_pins.h 里的普通 #define，而不是 Kconfig 选项：
+#  改引脚只需要改那一个文件，重新生成 sdkconfig 也不可能把引脚悄悄改回旧值，
+#  而且不用走一遍 menuconfig 就不会忘记。
 #
-# ESP32-WROOM rules: do not use gpio 1/3 (uart0), 6-11 (spi flash),
-# 34-39 (input only) or the strapping pins 0/2/5/12/15.
-
+#    PIN_I2S_BCK / PIN_I2S_WS / PIN_I2S_DATA / PIN_STATUS_LED / PIN_AMP_SD
+#    PIN_PWM / PIN_DAC_CHANNEL
+#
+#  ESP32-WROOM 的规矩：不能用 gpio 1/3（串口）、6-11（SPI Flash）、
+#  34-39（只能输入）、以及 0/2/5/12/15（启动模式引脚）。
